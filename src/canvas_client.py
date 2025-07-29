@@ -1,17 +1,20 @@
 import asyncio
 import aiohttp
 import logging
+import mimetypes
 from typing import Dict, List, Optional, Any
 
 from config import Config
+from drive_client import GoogleDriveClient
 
 class CanvasClient:
-    def __init__(self):
+    def __init__(self, drive_client: Optional[GoogleDriveClient] = None):
         """Initialize the Canvas API client."""
         self.api_url = Config.CANVAS_URL
         self.api_token = Config.CANVAS_API_TOKEN
         self.headers = {'Authorization': f'Bearer {self.api_token}'}
         self.logger = logging.getLogger(__name__)
+        self.drive_client = drive_client
 
     async def _get(self, session: aiohttp.ClientSession, endpoint: str) -> Optional[Dict[str, Any]]:
         """Make a GET request to the Canvas API."""
@@ -84,29 +87,135 @@ class CanvasClient:
         quiz = await self._get(session, f"/courses/{course_id}/quizzes/{quiz_id}")
         return quiz.get("description") if quiz else None
 
-    async def get_file_content(self, session: aiohttp.ClientSession, file_id: int) -> Optional[str]:
-        """Retrieve a file's content."""
+    async def get_file_content(self, session: aiohttp.ClientSession, file_id: int, 
+                              course_name: Optional[str] = None, 
+                              folder_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Download a file and upload it to Google Drive.
+        
+        Args:
+            session: aiohttp session for downloading
+            file_id: Canvas file ID
+            course_name: Name of the course (for folder organization)
+            folder_id: Specific Google Drive folder ID to upload to
+            
+        Returns:
+            dict: File information including Google Drive file ID, or None if failed
+        """
         file_info = await self._get(session, f"/files/{file_id}")
-        if file_info and (url := file_info.get("url")):
-            try:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        content_type = file_info.get("content-type", "").lower()
-                        if content_type.startswith("text/") or "html" in content_type:
-                            return await response.text()
-                        return f"Binary file: {file_info.get('display_name', 'Unknown')} ({content_type})"
-            except aiohttp.ClientError as e:
-                self.logger.error(f"Network error downloading file {file_id}: {e}")
-        return None
+        if not file_info:
+            self.logger.warning(f"File {file_id} not found in Canvas")
+            return None
+            
+        file_url = file_info.get("url")
+        if not file_url:
+            self.logger.warning(f"No download URL for file {file_id}")
+            return None
+            
+        filename = file_info.get("display_name", f"canvas_file_{file_id}")
+        content_type = file_info.get("content-type", "")
+        file_size = file_info.get("size", 0)
+        
+        try:
+            # Download file from Canvas
+            self.logger.info(f"Downloading file '{filename}' ({file_size} bytes)")
+            async with session.get(file_url) as response:
+                if response.status != 200:
+                    self.logger.error(f"Failed to download file {file_id}: HTTP {response.status}")
+                    return None
+                
+                file_content = await response.read()
+                
+                # Determine MIME type if not provided
+                if not content_type:
+                    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                
+                result = {
+                    "canvas_file_id": file_id,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size": len(file_content),
+                    "canvas_url": file_url,
+                    "drive_file_id": None,
+                    "drive_url": None,
+                    "upload_success": False
+                }
+                
+                # Upload to Google Drive if drive_client is available
+                if self.drive_client:
+                    try:
+                        # Upload file to Google Drive
+                        drive_file_id = self.drive_client.upload_file(
+                            file_content=file_content,
+                            filename=filename,
+                            mime_type=content_type,
+                            folder_id=folder_id
+                        )
+                        
+                        if drive_file_id:
+                            result.update({
+                                "drive_file_id": drive_file_id,
+                                "drive_url": f"https://drive.google.com/file/d/{drive_file_id}/view",
+                                "upload_success": True
+                            })
+                            self.logger.info(f"Successfully uploaded '{filename}' to Google Drive")
+                        else:
+                            self.logger.error(f"Failed to upload '{filename}' to Google Drive")
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error uploading file to Google Drive: {e}")
+                        
+                else:
+                    self.logger.info(f"No Google Drive client available, file downloaded but not uploaded")
+                
+                return result
+                
+        except aiohttp.ClientError as e:
+            self.logger.error(f"Network error downloading file {file_id}: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error processing file {file_id}: {e}")
+            return None
 
-    async def fetch_module_item_content(self, session: aiohttp.ClientSession, course_id: int, module_item: Dict[str, Any]) -> Optional[str]:
-        """Fetch content of a module item based on its type."""
+    async def fetch_module_item_content(self, session: aiohttp.ClientSession, course_id: int, 
+                                       module_item: Dict[str, Any], course_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Fetch content of a module item based on its type.
+        
+        Args:
+            session: aiohttp session
+            course_id: Canvas course ID
+            module_item: Module item data from Canvas
+            course_name: Name of the course (for file organization)
+            
+        Returns:
+            dict: Content information (varies by item type)
+        """
         item_type = module_item.get("type")
+        
         if item_type == "Page":
-            return await self.get_page_content(session, course_id, module_item.get("page_url", ""))
+            content = await self.get_page_content(session, course_id, module_item.get("page_url", ""))
+            return {
+                "type": "page",
+                "content": content,
+                "title": module_item.get("title"),
+                "page_url": module_item.get("page_url")
+            }
         elif item_type == "File":
-            return await self.get_file_content(session, module_item.get("content_id", 0))
-        return None
+            file_result = await self.get_file_content(
+                session, 
+                module_item.get("content_id", 0), 
+                course_name=course_name
+            )
+            if file_result:
+                file_result["type"] = "file"
+                file_result["title"] = module_item.get("title")
+            return file_result
+        else:
+            return {
+                "type": item_type.lower() if item_type else "unknown",
+                "title": module_item.get("title"),
+                "url": module_item.get("html_url"),
+                "content": f"Unsupported item type: {item_type}"
+            }
 
     def _html_to_text(self, html_content: Optional[str]) -> str:
         """Convert HTML to plain text."""
