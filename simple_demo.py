@@ -3,6 +3,7 @@
 Simple Canvas to Google Drive File Transfer Demo
 
 Fetches files from course 213007 and uploads them to Google Drive.
+Now includes duplicate file detection - files with the same name are automatically skipped!
 """
 
 import asyncio
@@ -17,36 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from canvas_client import CanvasClient
 from drive_client import GoogleDriveClient
 
-
-def select_google_drive_folder(drive_client: GoogleDriveClient) -> str:
-    """Let user select a Google Drive folder for uploads."""
-    print("\n📂 Available Google Drive folders:")
-    folders = drive_client.get_all_folders()
-    
-    if not folders:
-        print("No folders found. Files will be uploaded to Drive root.")
-        return None
-    
-    # Display folders with numbers
-    print("0. Root folder (My Drive)")
-    for i, folder in enumerate(folders, 1):
-        print(f"{i}. {folder['name']}")
-    
-    while True:
-        try:
-            choice = input(f"\nSelect folder (0-{len(folders)}): ").strip()
-            choice_num = int(choice)
-            
-            if choice_num == 0:
-                return None  # Root folder
-            elif 1 <= choice_num <= len(folders):
-                selected_folder = folders[choice_num - 1]
-                print(f"✅ Selected folder: {selected_folder['name']}")
-                return selected_folder['id']
-            else:
-                print("❌ Invalid selection. Please try again.")
-        except ValueError:
-            print("❌ Please enter a valid number.")
 
 
 async def main():
@@ -136,16 +107,39 @@ async def main():
     
     print(f"\n✅ Found {len(files_found)} files in the course!")
     
-    # Step 5: Select Google Drive folder
-    print("\n5️⃣ Google Drive Folder Selection")
-    target_folder_id = select_google_drive_folder(drive_client)
+    # Step 5: Get default folder (UniMelb-2025-S2)
+    print("\n5️⃣ Getting default folder (UniMelb-2025-S2)")
+    target_folder_id = drive_client.get_folder_id()
+    if target_folder_id:
+        print("✅ Found UniMelb-2025-S2 folder")
+    else:
+        print("❌ UniMelb-2025-S2 folder not found. Files will be uploaded to Drive root.")
+    
+    # Step 5.5: Demonstrate duplicate detection
+    print("\n5️⃣.5️⃣ Checking for existing files (Duplicate Detection Demo)")
+    print("🔍 Scanning target folder for existing files...")
+    existing_files = []
+    for file_info in files_found[:3]:  # Check first 3 files as demo
+        existing_file = drive_client.file_exists(file_info['title'], target_folder_id)
+        if existing_file:
+            existing_files.append(file_info['title'])
+            print(f"    🔄 '{file_info['title']}' already exists (will be skipped)")
+        else:
+            print(f"    ✅ '{file_info['title']}' is new (will be uploaded)")
+    
+    if existing_files:
+        print(f"\n💡 Found {len(existing_files)} duplicate(s) that will be automatically skipped!")
+    else:
+        print(f"\n✨ No duplicates found in sample - all files appear to be new!")
     
     # Step 6: Transfer files
     print(f"\n6️⃣ Transferring Files")
     print("=" * 30)
+    print("ℹ️  Files with the same name will be automatically skipped to prevent duplicates!")
     
     successful_transfers = 0
     failed_transfers = 0
+    skipped_duplicates = 0
     
     async with aiohttp.ClientSession() as session:
         for i, file_info in enumerate(files_found, 1):
@@ -161,9 +155,16 @@ async def main():
                 )
                 
                 if result and result.get('upload_success'):
-                    successful_transfers += 1
-                    print(f"    ✅ Successfully uploaded!")
-                    print(f"    📁 Google Drive: {result['drive_url']}")
+                    # Check if this was a duplicate (existing file)
+                    if result.get('duplicate_skipped', False):
+                        skipped_duplicates += 1
+                        print(f"    🔄 File already exists - skipped duplicate!")
+                        print(f"    📁 Existing file: {result['drive_url']}")
+                        print(f"    💾 Saved bandwidth by not re-uploading")
+                    else:
+                        successful_transfers += 1
+                        print(f"    ✅ Successfully uploaded new file!")
+                        print(f"    📁 Google Drive: {result['drive_url']}")
                     print(f"    📊 Size: {result['size']:,} bytes")
                 elif result:
                     failed_transfers += 1
@@ -180,12 +181,29 @@ async def main():
     # Step 7: Summary
     print(f"\n7️⃣ Transfer Summary")
     print("=" * 20)
-    print(f"✅ Successful transfers: {successful_transfers}")
+    print(f"✅ New files uploaded: {successful_transfers}")
+    print(f"🔄 Duplicates skipped: {skipped_duplicates}")
     print(f"❌ Failed transfers: {failed_transfers}")
     print(f"📊 Total files processed: {len(files_found)}")
     
-    if successful_transfers > 0:
-        print(f"\n🎉 Files successfully uploaded to Google Drive!")
+    # Calculate efficiency metrics
+    total_success = successful_transfers + skipped_duplicates
+    if len(files_found) > 0:
+        success_rate = (total_success / len(files_found)) * 100
+        print(f"📈 Success rate: {success_rate:.1f}%")
+        
+    if skipped_duplicates > 0:
+        print(f"\n💡 Duplicate Detection Benefits:")
+        print(f"   • Prevented {skipped_duplicates} redundant uploads")
+        print(f"   • Saved bandwidth and storage space")
+        print(f"   • Maintained file organization without conflicts")
+    
+    if successful_transfers > 0 or skipped_duplicates > 0:
+        print(f"\n🎉 File transfer process completed successfully!")
+        if successful_transfers > 0:
+            print(f"   📤 {successful_transfers} new files uploaded")
+        if skipped_duplicates > 0:
+            print(f"   🔄 {skipped_duplicates} duplicates intelligently skipped")
     
     print("\n✨ Demo completed!")
 

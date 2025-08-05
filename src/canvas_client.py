@@ -143,6 +143,9 @@ class CanvasClient:
                 # Upload to Google Drive if drive_client is available
                 if self.drive_client:
                     try:
+                        # Check if file already exists before upload
+                        existing_file = self.drive_client.file_exists(filename, folder_id)
+                        
                         # Upload file to Google Drive
                         drive_file_id = self.drive_client.upload_file(
                             file_content=file_content,
@@ -155,9 +158,13 @@ class CanvasClient:
                             result.update({
                                 "drive_file_id": drive_file_id,
                                 "drive_url": f"https://drive.google.com/file/d/{drive_file_id}/view",
-                                "upload_success": True
+                                "upload_success": True,
+                                "duplicate_skipped": existing_file is not None
                             })
-                            self.logger.info(f"Successfully uploaded '{filename}' to Google Drive")
+                            if existing_file:
+                                self.logger.info(f"File '{filename}' already existed in Google Drive, skipped duplicate")
+                            else:
+                                self.logger.info(f"Successfully uploaded new file '{filename}' to Google Drive")
                         else:
                             self.logger.error(f"Failed to upload '{filename}' to Google Drive")
                             
@@ -166,6 +173,7 @@ class CanvasClient:
                         
                 else:
                     self.logger.info(f"No Google Drive client available, file downloaded but not uploaded")
+                    result["duplicate_skipped"] = False
                 
                 return result
                 
