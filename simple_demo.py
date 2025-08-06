@@ -2,7 +2,7 @@
 """
 Simple Canvas to Google Drive File Transfer Demo
 
-Fetches files from course 213007 and uploads them to Google Drive.
+Fetches files from multiple Canvas courses and uploads them to Google Drive.
 Now includes duplicate file detection - files with the same name are automatically skipped!
 """
 
@@ -21,16 +21,16 @@ from drive_client import GoogleDriveClient
 
 
 async def main():
-    """Main function to transfer files from Canvas course 213007 to Google Drive."""
+    """Main function to transfer files from multiple Canvas courses to Google Drive."""
     
     # Set up logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    # Fixed course ID
-    COURSE_ID = 213007
+    # Multiple course IDs
+    COURSE_IDS = [213800, 214943, 213007]
     
     print("🚀 Canvas to Google Drive File Transfer")
-    print(f"📚 Course ID: {COURSE_ID}")
+    print(f"📚 Course IDs: {COURSE_IDS}")
     print("=" * 50)
     
     # Step 1: Initialize Google Drive client
@@ -54,72 +54,84 @@ async def main():
         print("Make sure CANVAS_API_TOKEN is set in your .env file.")
         return
     
-    # Step 3: Get course info
-    print(f"\n3️⃣ Fetching course information...")
-    try:
-        course_info = await canvas_client.get_course(COURSE_ID)
-        if course_info:
-            course_name = course_info.get('name', f'Course {COURSE_ID}')
-            print(f"✅ Found course: {course_name}")
-        else:
-            print(f"⚠️  Course {COURSE_ID} not found or not accessible")
-            course_name = f'Course {COURSE_ID}'
-    except Exception as e:
-        print(f"⚠️  Error fetching course info: {e}")
-        course_name = f'Course {COURSE_ID}'
-    
-    # Step 4: Find files in course modules
-    print(f"\n4️⃣ Scanning course {COURSE_ID} for files...")
-    files_found = []
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            # Get all modules in the course
-            modules = await canvas_client.get_modules(session, COURSE_ID)
-            print(f"Found {len(modules)} modules")
-            
-            for module in modules:
-                module_id = module.get('id')
-                module_name = module.get('name', 'Unknown Module')
-                print(f"  📁 Checking module: {module_name}")
-                
-                # Get items in each module
-                items = await canvas_client.get_module_items_with_session(session, COURSE_ID, module_id)
-                
-                for item in items:
-                    if item.get('type') == 'File':
-                        file_info = {
-                            'module_name': module_name,
-                            'title': item.get('title', 'Unknown File'),
-                            'content_id': item.get('content_id'),
-                            'url': item.get('html_url'),
-                            'item': item
-                        }
-                        files_found.append(file_info)
-                        print(f"    📄 Found file: {file_info['title']}")
-        except Exception as e:
-            print(f"❌ Error scanning course: {e}")
-            return
-    
-    if not files_found:
-        print("❌ No files found in the course modules.")
-        return
-    
-    print(f"\n✅ Found {len(files_found)} files in the course!")
-    
-    # Step 5: Get default folder (UniMelb-2025-S2)
-    print("\n5️⃣ Getting default folder (UniMelb-2025-S2)")
+    # Step 3: Get default folder (UniMelb-2025-S2)
+    print("\n3️⃣ Getting default folder (UniMelb-2025-S2)")
     target_folder_id = drive_client.get_folder_id()
     if target_folder_id:
         print("✅ Found UniMelb-2025-S2 folder")
     else:
         print("❌ UniMelb-2025-S2 folder not found. Files will be uploaded to Drive root.")
     
-    # Step 5.5: Demonstrate duplicate detection
-    print("\n5️⃣.5️⃣ Checking for existing files (Duplicate Detection Demo)")
+    # Step 4: Process each course
+    all_files_found = []
+    
+    async with aiohttp.ClientSession() as session:
+        for course_idx, course_id in enumerate(COURSE_IDS, 1):
+            print(f"\n4️⃣.{course_idx} Processing Course {course_id}")
+            print("=" * 40)
+            
+            # Get course info
+            try:
+                course_info = await canvas_client.get_course(course_id)
+                if course_info:
+                    course_name = course_info.get('name', f'Course {course_id}')
+                    print(f"✅ Found course: {course_name}")
+                else:
+                    print(f"⚠️  Course {course_id} not found or not accessible")
+                    course_name = f'Course {course_id}'
+            except Exception as e:
+                print(f"⚠️  Error fetching course info: {e}")
+                course_name = f'Course {course_id}'
+            
+            # Find files in course modules
+            print(f"🔍 Scanning course {course_id} for files...")
+            course_files = []
+            
+            try:
+                # Get all modules in the course
+                modules = await canvas_client.get_modules(session, course_id)
+                print(f"Found {len(modules)} modules")
+                
+                for module in modules:
+                    module_id = module.get('id')
+                    module_name = module.get('name', 'Unknown Module')
+                    print(f"  📁 Checking module: {module_name}")
+                    
+                    # Get items in each module
+                    items = await canvas_client.get_module_items_with_session(session, course_id, module_id)
+                    
+                    for item in items:
+                        if item.get('type') == 'File':
+                            file_info = {
+                                'course_id': course_id,
+                                'course_name': course_name,
+                                'module_name': module_name,
+                                'title': item.get('title', 'Unknown File'),
+                                'content_id': item.get('content_id'),
+                                'url': item.get('html_url'),
+                                'item': item
+                            }
+                            course_files.append(file_info)
+                            print(f"    📄 Found file: {file_info['title']}")
+                
+                print(f"✅ Found {len(course_files)} files in {course_name}")
+                all_files_found.extend(course_files)
+                
+            except Exception as e:
+                print(f"❌ Error scanning course {course_id}: {e}")
+                continue
+    
+    if not all_files_found:
+        print("❌ No files found in any of the courses.")
+        return
+    
+    print(f"\n✅ Found {len(all_files_found)} files across all courses!")
+    
+    # Step 5: Demonstrate duplicate detection
+    print("\n5️⃣ Checking for existing files (Duplicate Detection Demo)")
     print("🔍 Scanning target folder for existing files...")
     existing_files = []
-    for file_info in files_found[:3]:  # Check first 3 files as demo
+    for file_info in all_files_found[:3]:  # Check first 3 files as demo
         existing_file = drive_client.file_exists(file_info['title'], target_folder_id)
         if existing_file:
             existing_files.append(file_info['title'])
@@ -142,8 +154,9 @@ async def main():
     skipped_duplicates = 0
     
     async with aiohttp.ClientSession() as session:
-        for i, file_info in enumerate(files_found, 1):
-            print(f"\n[{i}/{len(files_found)}] Processing: {file_info['title']}")
+        for i, file_info in enumerate(all_files_found, 1):
+            print(f"\n[{i}/{len(all_files_found)}] Processing: {file_info['title']}")
+            print(f"    Course: {file_info['course_name']} (ID: {file_info['course_id']})")
             print(f"    Module: {file_info['module_name']}")
             
             try:
@@ -184,12 +197,12 @@ async def main():
     print(f"✅ New files uploaded: {successful_transfers}")
     print(f"🔄 Duplicates skipped: {skipped_duplicates}")
     print(f"❌ Failed transfers: {failed_transfers}")
-    print(f"📊 Total files processed: {len(files_found)}")
+    print(f"📊 Total files processed: {len(all_files_found)}")
     
     # Calculate efficiency metrics
     total_success = successful_transfers + skipped_duplicates
-    if len(files_found) > 0:
-        success_rate = (total_success / len(files_found)) * 100
+    if len(all_files_found) > 0:
+        success_rate = (total_success / len(all_files_found)) * 100
         print(f"📈 Success rate: {success_rate:.1f}%")
         
     if skipped_duplicates > 0:
